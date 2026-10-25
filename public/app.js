@@ -1,5 +1,6 @@
 const $ = selector => document.querySelector(selector);
-const state = { containers: [], quadlets: [], quadletConfigured: null, filter: 'all', query: '', quadletQuery: '', selected: null, loading: false };
+const state = { containers: [], quadlets: [], quadletConfigured: null, filter: 'all', query: '', quadletQuery: '', selected: null, loading: false, sort: { containers: { key: 'name', direction: 'asc' }, quadlets: { key: 'name', direction: 'asc' } } };
+const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -32,6 +33,36 @@ function stateClass(value) {
   return 'other';
 }
 
+function sortRows(rows, sort, valueFor) {
+  return rows.sort((a, b) => {
+    const left = String(valueFor(a, sort.key) || '').trim();
+    const right = String(valueFor(b, sort.key) || '').trim();
+    if (!left && right) return 1;
+    if (left && !right) return -1;
+    const comparison = collator.compare(left, right);
+    if (comparison) return sort.direction === 'asc' ? comparison : -comparison;
+    return collator.compare(String(valueFor(a, 'name') || ''), String(valueFor(b, 'name') || ''));
+  });
+}
+
+function containerSortValue(item, key) {
+  if (key === 'ports') return item.ports?.length ? formatPorts(item.ports) : '';
+  if (key === 'source') return 'Podman';
+  if (key === 'status') return item.state;
+  return item[key];
+}
+
+function updateSortHeaders(table) {
+  const sort = state.sort[table];
+  for (const header of document.querySelectorAll(`#${table} th.sortable`)) {
+    const active = header.dataset.sortKey === sort.key;
+    header.setAttribute('aria-sort', active ? sort.direction === 'asc' ? 'ascending' : 'descending' : 'none');
+    header.querySelector('.sort-indicator').textContent = active ? sort.direction === 'asc' ? '↑' : '↓' : '';
+    const button = header.querySelector('button');
+    button.title = `Sort by ${button.firstChild.textContent.trim()} ${active && sort.direction === 'asc' ? 'descending' : 'ascending'}`;
+  }
+}
+
 function render() {
   const containers = state.containers.filter(item => !item.systemdUnit);
   const running = containers.filter(item => item.state === 'running').length;
@@ -39,12 +70,12 @@ function render() {
   $('#running-count').textContent = running;
   $('#stopped-count').textContent = containers.length - running;
   $('#quadlet-count').textContent = state.quadletConfigured === null && !state.containers.length ? '—' : visibleQuadlets().length;
-  const filtered = containers.filter(item => {
+  const filtered = sortRows(containers.filter(item => {
     if (state.filter === 'running' && item.state !== 'running') return false;
     if (state.filter === 'stopped' && item.state === 'running') return false;
     const search = `${item.name} ${item.image} ${item.id}`.toLowerCase();
     return search.includes(state.query);
-  }).sort((a, b) => a.name.localeCompare(b.name));
+  }), state.sort.containers, containerSortValue);
   $('#result-count').textContent = `Showing ${filtered.length} of ${containers.length} containers`;
   const body = $('#container-list');
   body.replaceChildren();
@@ -83,6 +114,15 @@ function render() {
 
 function linkedContainers(item) {
   return state.containers.filter(container => container.systemdUnit === item.service);
+}
+
+function quadletSortValue(item, key) {
+  const matches = linkedContainers(item);
+  if (key === 'name') return matches.length === 1 ? matches[0].name : item.name;
+  if (key === 'type') return item.kind;
+  if (key === 'status') return matches.length === 1 ? matches[0].state : matches.length ? `${matches.length} linked` : ['container', 'kube'].includes(item.kind) ? 'No container' : '';
+  if (key === 'image') return ['container', 'image', 'build'].includes(item.kind) ? matches[0]?.image || item.fields.find(field => field.label === 'Image' || field.label === 'ImageTag')?.value : '';
+  return item[key];
 }
 
 function visibleQuadlets() {
@@ -131,7 +171,7 @@ function renderQuadlets() {
     $('#quadlet-result-count').textContent = 'No Quadlet directory mounted';
     return;
   }
-  const filtered = items.filter(item => `${item.name} ${item.kind} ${item.service} ${item.description} ${linkedContainers(item).map(container => container.name).join(' ')}`.toLowerCase().includes(state.quadletQuery));
+  const filtered = sortRows(items.filter(item => `${item.name} ${item.kind} ${item.service} ${item.description} ${linkedContainers(item).map(container => container.name).join(' ')}`.toLowerCase().includes(state.quadletQuery)), state.sort.quadlets, quadletSortValue);
   $('#quadlet-result-count').textContent = `Showing ${filtered.length} of ${items.length} resources`;
   if (!filtered.length) {
     const row = element('tr');
@@ -154,9 +194,7 @@ function renderQuadlets() {
     const kind = element('td');
     kind.append(element('span', 'kind-badge', item.kind));
     const service = element('td', 'mono-cell', item.service);
-    const image = ['container', 'image', 'build'].includes(item.kind)
-      ? matches[0]?.image || item.fields.find(field => field.label === 'Image' || field.label === 'ImageTag')?.value
-      : null;
+    const image = quadletSortValue(item, 'image');
     const imageCell = element('td', 'image-cell', image || '—');
     imageCell.title = image || '';
     const container = element('td');
@@ -335,6 +373,18 @@ function openQuadletDetails(item) {
 }
 
 $('#refresh').addEventListener('click', () => refresh());
+for (const table of ['containers', 'quadlets']) {
+  updateSortHeaders(table);
+  document.querySelectorAll(`#${table} th.sortable`).forEach(header => header.querySelector('button').addEventListener('click', () => {
+    const sort = state.sort[table];
+    const key = header.dataset.sortKey;
+    sort.direction = sort.key === key && sort.direction === 'asc' ? 'desc' : 'asc';
+    sort.key = key;
+    updateSortHeaders(table);
+    if (table === 'containers') render();
+    else renderQuadlets();
+  }));
+}
 $('#search').addEventListener('input', event => { state.query = event.target.value.trim().toLowerCase(); render(); });
 $('#quadlet-search').addEventListener('input', event => { state.quadletQuery = event.target.value.trim().toLowerCase(); renderQuadlets(); });
 function showView(view, updateHash = false) {

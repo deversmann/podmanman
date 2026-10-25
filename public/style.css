@@ -17,3 +17,9 @@
 .panel:focus{outline:none}
 @media(max-width:780px){.topbar{padding:0 20px}.content{padding-top:30px}}
 @media(max-width:560px){.topbar{height:62px}.connection span:last-child{display:none}.view-tab{flex:1;text-align:center}}
+
+th.sortable{padding:0}
+.sort-button{display:flex;align-items:center;gap:7px;width:100%;min-height:42px;padding:13px 21px;border:0;background:transparent;color:inherit;text-align:left;font-size:inherit;font-weight:inherit;letter-spacing:inherit;white-space:nowrap}
+.sort-button:hover{background:#242e48;color:#d9d5ff}
+.sort-button:focus-visible{outline:2px solid #a39aff;outline-offset:-3px}
+.sort-indicator{min-width:13px;color:#ada5ff;font-size:14px;line-height:1}

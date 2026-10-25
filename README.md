@@ -8,6 +8,7 @@ A small web dashboard for containers and Quadlet resources on a Podman host. It 
 - Lists directly managed Podman containers, including stopped containers.
 - Shows state, image, ports, inspect details, and the latest 200 log lines.
 - Searches and filters containers.
+- Sorts either table by clicking a column heading; a second click reverses the order.
 - Starts, stops, and restarts containers managed directly through Podman.
 - Identifies systemd managed containers through the `PODMAN_SYSTEMD_UNIT` label and points users to their service unit. Their lifecycle controls are intentionally handled by systemd.
 - Displays read only Quadlet definitions for containers, pods, networks, volumes, images, builds, artifacts, and Kubernetes deployments. These remain visible before their service creates a Podman resource.
