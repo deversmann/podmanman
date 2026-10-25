@@ -1,5 +1,5 @@
 const $ = selector => document.querySelector(selector);
-const state = { containers: [], quadlets: [], quadletConfigured: null, filter: 'all', query: '', quadletQuery: '', selected: null, loading: false, sort: { containers: { key: 'name', direction: 'asc' }, quadlets: { key: 'name', direction: 'asc' } } };
+const state = { containers: [], quadlets: [], quadletRows: [], quadletConfigured: null, filter: 'all', query: '', quadletQuery: '', selected: null, loading: false, sort: { containers: { key: 'name', direction: 'asc' }, quadlets: { key: 'name', direction: 'asc' } } };
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
 function element(tag, className, text) {
@@ -69,7 +69,7 @@ function render() {
   $('#total-count').textContent = containers.length;
   $('#running-count').textContent = running;
   $('#stopped-count').textContent = containers.length - running;
-  $('#quadlet-count').textContent = state.quadletConfigured === null && !state.containers.length ? '—' : visibleQuadlets().length;
+  $('#quadlet-count').textContent = state.quadletConfigured === null && !state.containers.length ? '—' : state.quadletRows.length;
   const filtered = sortRows(containers.filter(item => {
     if (state.filter === 'running' && item.state !== 'running') return false;
     if (state.filter === 'stopped' && item.state === 'running') return false;
@@ -112,26 +112,17 @@ function render() {
   }
 }
 
-function linkedContainers(item) {
-  return state.containers.filter(container => container.systemdUnit === item.service);
-}
-
-function quadletSortValue(item, key) {
-  const matches = linkedContainers(item);
-  if (key === 'name') return matches.length === 1 ? matches[0].name : item.name;
-  if (key === 'type') return item.kind;
-  if (key === 'status') return matches.length === 1 ? matches[0].state : matches.length ? `${matches.length} linked` : ['container', 'kube'].includes(item.kind) ? 'No container' : '';
-  if (key === 'image') return ['container', 'image', 'build'].includes(item.kind) ? matches[0]?.image || item.fields.find(field => field.label === 'Image' || field.label === 'ImageTag')?.value : '';
-  return item[key];
-}
-
-function visibleQuadlets() {
-  const definitions = [...state.quadlets];
+function buildQuadletRows(definitions, containers) {
+  const items = [...definitions];
   const known = new Set(definitions.map(item => item.service));
-  for (const container of state.containers) {
+  const linkedByUnit = new Map();
+  for (const container of containers) {
     const unit = container.systemdUnit;
-    if (!unit || known.has(unit)) continue;
-    definitions.push({
+    if (!unit) continue;
+    if (!linkedByUnit.has(unit)) linkedByUnit.set(unit, []);
+    linkedByUnit.get(unit).push(container);
+    if (known.has(unit)) continue;
+    items.push({
       id: `runtime:${unit}`,
       name: unit,
       kind: 'container',
@@ -146,13 +137,33 @@ function visibleQuadlets() {
     });
     known.add(unit);
   }
-  return definitions.sort((a, b) => a.name.localeCompare(b.name));
+  return items.map(item => {
+    const linked = linkedByUnit.get(item.service) || [];
+    const name = linked.length === 1 ? linked[0].name : item.name;
+    const secondaryName = linked.length === 1 ? item.name : item.runtimeOnly ? 'Source file not mounted' : item.description || item.path;
+    const image = ['container', 'image', 'build'].includes(item.kind)
+      ? linked[0]?.image || item.fields.find(field => field.label === 'Image' || field.label === 'ImageTag')?.value || ''
+      : '';
+    const status = linked.length === 1 ? linked[0].state : linked.length ? `${linked.length} linked` : ['container', 'kube'].includes(item.kind) ? 'No container' : '—';
+    return {
+      item, linked, name, secondaryName, image, status,
+      statusClass: linked.some(container => container.state === 'running') ? 'running' : 'stopped',
+      searchText: `${item.name} ${item.kind} ${item.service} ${item.description} ${linked.map(container => container.name).join(' ')}`.toLowerCase()
+    };
+  });
+}
+
+function quadletSortValue(row, key) {
+  if (key === 'type') return row.item.kind;
+  if (key === 'service') return row.item.service;
+  if (key === 'status') return row.status === '—' ? '' : row.status;
+  return row[key];
 }
 
 function renderQuadlets() {
   const body = $('#quadlet-list');
   body.replaceChildren();
-  const items = visibleQuadlets();
+  const items = state.quadletRows;
   if (state.quadletConfigured === null && !items.length) {
     const row = element('tr');
     const cell = element('td', 'empty', 'Quadlet inventory unavailable.');
@@ -171,7 +182,7 @@ function renderQuadlets() {
     $('#quadlet-result-count').textContent = 'No Quadlet directory mounted';
     return;
   }
-  const filtered = sortRows(items.filter(item => `${item.name} ${item.kind} ${item.service} ${item.description} ${linkedContainers(item).map(container => container.name).join(' ')}`.toLowerCase().includes(state.quadletQuery)), state.sort.quadlets, quadletSortValue);
+  const filtered = sortRows(items.filter(item => item.searchText.includes(state.quadletQuery)), state.sort.quadlets, quadletSortValue);
   $('#quadlet-result-count').textContent = `Showing ${filtered.length} of ${items.length} resources`;
   if (!filtered.length) {
     const row = element('tr');
@@ -181,33 +192,28 @@ function renderQuadlets() {
     body.append(row);
     return;
   }
-  for (const item of filtered) {
+  for (const entry of filtered) {
     const row = element('tr');
-    const matches = linkedContainers(item);
-    const primaryName = matches.length === 1 ? matches[0].name : item.name;
-    const secondaryName = matches.length === 1 ? item.name : item.runtimeOnly ? 'Source file not mounted' : item.description || item.path;
     const nameCell = element('td');
-    const name = element('button', 'name-button', primaryName);
+    const name = element('button', 'name-button', entry.name);
     name.type = 'button';
-    name.addEventListener('click', () => openQuadletDetails(item));
-    nameCell.append(name, element('span', 'container-id', secondaryName));
+    name.addEventListener('click', () => openQuadletDetails(entry));
+    nameCell.append(name, element('span', 'container-id', entry.secondaryName));
     const kind = element('td');
-    kind.append(element('span', 'kind-badge', item.kind));
-    const service = element('td', 'mono-cell', item.service);
-    const image = quadletSortValue(item, 'image');
-    const imageCell = element('td', 'image-cell', image || '—');
-    imageCell.title = image || '';
+    kind.append(element('span', 'kind-badge', entry.item.kind));
+    const service = element('td', 'mono-cell', entry.item.service);
+    const imageCell = element('td', 'image-cell', entry.image || '—');
+    imageCell.title = entry.image;
     const container = element('td');
-    if (matches.length) {
-      const label = matches.length === 1 ? matches[0].state : `${matches.length} linked`;
-      container.append(element('span', `badge ${matches.some(match => match.state === 'running') ? 'running' : 'stopped'}`, label));
+    if (entry.linked.length) {
+      container.append(element('span', `badge ${entry.statusClass}`, entry.status));
     } else {
-      container.textContent = ['container', 'kube'].includes(item.kind) ? 'No container' : '—';
+      container.textContent = entry.status;
     }
     const viewCell = element('td');
     const view = element('button', 'view-button', 'View →');
     view.type = 'button';
-    view.addEventListener('click', () => openQuadletDetails(item));
+    view.addEventListener('click', () => openQuadletDetails(entry));
     viewCell.append(view);
     row.append(nameCell, kind, service, imageCell, container, viewCell);
     body.append(row);
@@ -240,6 +246,7 @@ async function refresh(silent = false) {
       state.quadletConfigured = null;
       errors.push(`Quadlets: ${quadlets.reason.message}`);
     }
+    state.quadletRows = buildQuadletRows(state.quadlets, state.containers);
     if (!silent || errors.length === 0) setNotice(errors.join(' '));
     render();
   } finally {
@@ -335,13 +342,13 @@ function renderDetails(id, data, logs) {
   logSection.append(element('pre', 'logs', logs || 'No recent logs.'));
 }
 
-function openQuadletDetails(item) {
+function openQuadletDetails(entry) {
+  const { item, linked } = entry;
   state.selected = `quadlet:${item.id}`;
   $('#drawer').classList.remove('hidden');
   $('#drawer-backdrop').classList.remove('hidden');
   $('#drawer').setAttribute('aria-hidden', 'false');
-  const linked = linkedContainers(item);
-  $('#detail-name').textContent = linked.length === 1 ? linked[0].name : item.name;
+  $('#detail-name').textContent = entry.name;
   const body = $('#detail-body');
   body.replaceChildren();
   const status = element('div', 'detail-status');
