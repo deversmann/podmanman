@@ -14,11 +14,29 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.changes.outputs.publish }}
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+          fetch-depth: 0
+      - name: Check for application changes
+        id: changes
+        shell: bash
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          if ! git cat-file -e "$BEFORE_SHA^{commit}" 2>/dev/null; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          elif git diff --quiet "$BEFORE_SHA" "$GITHUB_SHA" -- . ':(exclude)README.md' ':(exclude)docs/**'; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            if [ "$status" -ne 1 ]; then exit "$status"; fi
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
@@ -29,6 +47,7 @@ jobs:
 
   publish:
     needs: test
+    if: ${{ needs.test.outputs.publish == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

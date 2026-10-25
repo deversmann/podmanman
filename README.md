@@ -96,7 +96,7 @@ The server listens on `127.0.0.1:3000` by default. Set `HOST` and `PORT` to chan
 
 ## CI and container images
 
-Every push to `main` runs the test suite. If it passes, [the publish workflow](.github/workflows/publish.yml) builds the `Containerfile` for Linux `amd64` and `arm64` and pushes both platforms to GitHub Container Registry as:
+Every push to `main` runs the test suite. If it passes, [the publish workflow](.github/workflows/publish.yml) builds the `Containerfile` for Linux `amd64` and `arm64` and pushes both platforms to GitHub Container Registry unless the push changes only `README.md` or files under `docs/`. Documentation-only pushes still run tests but skip the image build and publish job. Published images are tagged as:
 
 - `ghcr.io/deversmann/podmanman:latest`
 - `ghcr.io/deversmann/podmanman:sha-<full-commit-sha>`
