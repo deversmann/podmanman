@@ -87,6 +87,15 @@ npm test
 
 The server listens on `127.0.0.1:3000` by default. Set `HOST` and `PORT` to change this. `QUADLET_DIRS` defaults to `/quadlets`; when the directory is absent, the UI explains how to mount it. A `GET /api/health` endpoint checks socket connectivity. The server uses Podman's reported API version for Libpod requests.
 
+## CI and container images
+
+Every push to `main` runs the test suite. If it passes, [the publish workflow](.github/workflows/publish.yml) builds the `Containerfile` for Linux `amd64` and `arm64` and pushes both platforms to GitHub Container Registry as:
+
+- `ghcr.io/deversmann/podmanman:latest`
+- `ghcr.io/deversmann/podmanman:sha-<full-commit-sha>`
+
+The workflow uses GitHub's `GITHUB_TOKEN` with `packages: write` in the publish job, so no registry password or personal access token is needed. Replace `podmanman` in the run examples above with the GHCR image name to use a published build. The package may be private initially; set its visibility in GitHub package settings if you want anonymous pulls.
+
 ## Design
 
 The server serves a static browser UI and provides a narrow HTTP API. It proxies only selected calls to Podman's Libpod API over the Unix socket. The browser never connects to the socket directly. Inspect responses are reduced to the fields the UI displays, so environment variables and unrelated inspect data are not sent to the browser. The Quadlet inventory reads mounted files and returns selected display keys while omitting environment and credential directives. The server validates container IDs, checks request origins for state changes, and does not accept arbitrary Podman API paths.
