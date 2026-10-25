@@ -17,6 +17,12 @@ A small web dashboard for containers and Quadlet resources on a Podman host. It 
 
 The direct container list only includes objects that currently exist in Podman and are not marked as systemd managed. The Quadlet and systemd section lists definitions from mounted directories and links current containers by service label. It does not report systemd unit state or edit definitions.
 
+## Planned features
+
+- Add and delete directly managed rootless containers, starting with a focused creation form and clear deletion options.
+- Manage user-space Quadlet definitions: create, edit, and delete files, then add controls for their systemd user services.
+- Explore read-only views of rootful containers and Quadlets.
+
 ## Run on a rootless Linux host
 
 Enable the Podman API socket:
