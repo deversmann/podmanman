@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b1020">
+  <title>Podmanman</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">◈</span><span>Podmanman</span></div>
+      <div class="connection"><span class="connection-dot" id="connection-dot"></span><span id="connection-label">Connecting</span></div>
+    </header>
+    <main class="main">
+      <div class="content">
+        <div class="heading-row"><div><div class="eyebrow">WORKSPACE</div><h1>Podman overview</h1><p class="subtitle">Containers and Quadlet resources on this host.</p></div><button id="refresh" class="refresh" type="button" title="Refresh data">↻ <span>Refresh</span></button></div>
+        <div id="notice" class="notice hidden" role="alert"></div>
+        <section class="stats" aria-label="Container counts">
+          <div class="stat"><span class="stat-label">Direct containers</span><strong id="total-count">—</strong><span class="stat-foot">Across all states</span></div>
+          <div class="stat"><span class="stat-label">Running</span><strong id="running-count">—</strong><span class="stat-foot"><span class="mini-dot green"></span> Active now</span></div>
+          <div class="stat"><span class="stat-label">Stopped</span><strong id="stopped-count">—</strong><span class="stat-foot"><span class="mini-dot gray"></span> Not running</span></div>
+          <div class="stat"><span class="stat-label">Systemd resources</span><strong id="quadlet-count">—</strong><span class="stat-foot">Definitions and detected units</span></div>
+        </section>
+        <nav class="view-tabs" role="tablist" aria-label="Resource views">
+          <button id="containers-tab" class="view-tab active" type="button" role="tab" aria-selected="true" aria-controls="containers" data-view="containers">Containers</button>
+          <button id="quadlets-tab" class="view-tab" type="button" role="tab" aria-selected="false" aria-controls="quadlets" data-view="quadlets" tabindex="-1">Quadlets</button>
+        </nav>
+        <section id="containers" class="panel" role="tabpanel" aria-labelledby="containers-tab" tabindex="0">
+          <div class="panel-head"><div><h2>Direct containers</h2><p>Containers managed directly through Podman</p></div><label class="search-wrap"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="Search containers" aria-label="Search containers"></label></div>
+          <div class="filters" aria-label="Filter containers"><button class="filter active" data-filter="all" type="button">All</button><button class="filter" data-filter="running" type="button">Running</button><button class="filter" data-filter="stopped" type="button">Stopped</button></div>
+          <div class="table-scroll"><table><thead><tr><th>NAME</th><th>IMAGE</th><th>STATUS</th><th>SOURCE</th><th>PORTS</th><th></th></tr></thead><tbody id="container-list"><tr><td class="empty" colspan="6">Loading containers…</td></tr></tbody></table></div>
+          <div class="panel-foot"><span id="result-count">—</span><span>Refreshes every 15 seconds</span></div>
+        </section>
+        <section id="quadlets" class="panel" role="tabpanel" aria-labelledby="quadlets-tab" tabindex="0" hidden>
+          <div class="panel-head"><div><h2>Quadlet and systemd resources</h2><p>Definitions and detected systemd managed containers</p></div><label class="search-wrap"><span aria-hidden="true">⌕</span><input id="quadlet-search" type="search" placeholder="Search Quadlets" aria-label="Search Quadlets"></label></div>
+          <div class="table-scroll"><table><thead><tr><th>RESOURCE / CONTAINER</th><th>TYPE</th><th>SERVICE</th><th>IMAGE</th><th>STATUS</th><th></th></tr></thead><tbody id="quadlet-list"><tr><td class="empty" colspan="6">Loading Quadlet definitions…</td></tr></tbody></table></div>
+          <div class="panel-foot"><span id="quadlet-result-count">—</span><span>Read only inventory</span></div>
+        </section>
+      </div>
+    </main>
+  </div>
+  <div id="drawer-backdrop" class="drawer-backdrop hidden"></div>
+  <aside id="drawer" class="drawer hidden" aria-label="Container details" aria-hidden="true">
+    <div class="drawer-top"><div><div class="eyebrow">CONTAINER DETAILS</div><h2 id="detail-name">Container</h2></div><button id="close-drawer" class="icon-button" type="button" aria-label="Close details">×</button></div>
+    <div id="detail-body" class="drawer-body"></div>
+  </aside>
+</body>
+</html>
