@@ -1,7 +1,7 @@
 const $ = selector => document.querySelector(selector);
 const columnDefinitions = {
   containers: [{ key: 'name', label: 'Name' }, { key: 'image', label: 'Image' }, { key: 'status', label: 'Status' }, { key: 'source', label: 'Source' }, { key: 'ports', label: 'Ports' }, { key: 'mounts', label: 'Volume mounts', defaultVisible: false }],
-  quadlets: [{ key: 'name', label: 'Resource / container' }, { key: 'type', label: 'Type' }, { key: 'service', label: 'Service' }, { key: 'image', label: 'Image' }, { key: 'status', label: 'Status' }, { key: 'mounts', label: 'Volume mounts', defaultVisible: false }]
+  quadlets: [{ key: 'name', label: 'Resource / container' }, { key: 'type', label: 'Type' }, { key: 'service', label: 'Service' }, { key: 'image', label: 'Image' }, { key: 'status', label: 'Status' }, { key: 'ports', label: 'Ports', defaultVisible: false }, { key: 'mounts', label: 'Volume mounts', defaultVisible: false }]
 };
 function savedColumns(table) {
   const defaults = columnDefinitions[table].filter(column => column.defaultVisible !== false).map(column => column.key);
@@ -15,7 +15,7 @@ function savedColumns(table) {
   } catch { /* Private browsing can disable local storage. */ }
   return defaults;
 }
-const state = { containers: [], quadlets: [], quadletRows: [], quadletConfigured: null, filter: 'all', query: '', quadletQuery: '', selected: null, loading: false, pendingRefresh: false, columns: { containers: savedColumns('containers'), quadlets: savedColumns('quadlets') }, sort: { containers: { key: 'name', direction: 'asc' }, quadlets: { key: 'name', direction: 'asc' } } };
+const state = { containers: [], quadlets: [], quadletRows: [], quadletConfigured: null, quadletCanControl: false, quadletCanAdd: false, quadletCanConvert: false, filter: 'all', query: '', quadletQuery: '', selected: null, loading: false, pendingRefresh: false, columns: { containers: savedColumns('containers'), quadlets: savedColumns('quadlets') }, sort: { containers: { key: 'name', direction: 'asc' }, quadlets: { key: 'name', direction: 'asc' } } };
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
 function element(tag, className, text) {
@@ -32,6 +32,10 @@ async function request(path, options) {
   return result;
 }
 
+function sendJson(path, method, data) {
+  return request(path, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+}
+
 function setNotice(message) {
   const node = $('#notice');
   node.textContent = message || '';
@@ -41,6 +45,7 @@ function setNotice(message) {
 function setConnection(connected) {
   $('#connection-dot').classList.toggle('connected', connected);
   $('#connection-label').textContent = connected ? 'Connected to Podman' : 'Podman unavailable';
+  $('#launch-container').disabled = !connected;
 }
 
 function stateClass(value) {
@@ -216,13 +221,16 @@ function buildQuadletRows(definitions, containers) {
       ? linked[0]?.image || item.fields.find(field => field.label === 'Image' || field.label === 'ImageTag')?.value || ''
       : '';
     const status = linked.length === 1 ? linked[0].state : linked.length ? `${linked.length} linked` : ['container', 'kube'].includes(item.kind) ? 'No container' : '—';
+    const declaredPorts = item.fields.filter(field => field.label === 'PublishPort').map(field => field.value);
+    const runtimePorts = linked.flatMap(container => container.ports || []);
+    const ports = runtimePorts.length ? formatPorts(runtimePorts) : declaredPorts.join(', ');
     const declaredMounts = item.fields.filter(field => field.label === 'Volume' || field.label === 'Mount').map(field => field.value);
     const runtimeMounts = linked.length && linked.every(container => container.mounts !== null)
       ? linked.flatMap(container => container.mounts)
       : null;
     const mounts = runtimeMounts?.length ? formatMounts(runtimeMounts) : declaredMounts.join(', ');
     return {
-      item, linked, name, secondaryName, image, status, mounts,
+      item, linked, name, secondaryName, image, status, ports, mounts,
       statusClass: linked.some(container => container.state === 'running') ? 'running' : 'stopped',
       searchText: `${item.name} ${item.kind} ${item.service} ${item.description} ${linked.map(container => container.name).join(' ')}`.toLowerCase()
     };
@@ -262,6 +270,7 @@ function quadletCell(entry, key) {
     else cell.textContent = entry.status;
     return cell;
   }
+  if (key === 'ports') return element('td', '', entry.ports || '—');
   return mountCell(entry.mounts || '—');
 }
 
@@ -320,10 +329,18 @@ async function refresh(silent = false) {
     if (quadlets.status === 'fulfilled') {
       state.quadlets = quadlets.value.definitions;
       state.quadletConfigured = quadlets.value.configured;
+      state.quadletCanControl = quadlets.value.canControl;
+      state.quadletCanAdd = quadlets.value.canAdd;
+      state.quadletCanConvert = quadlets.value.canConvert;
     } else {
       state.quadletConfigured = null;
+      state.quadletCanControl = false;
+      state.quadletCanAdd = false;
+      state.quadletCanConvert = false;
       errors.push(`Quadlets: ${quadlets.reason.message}`);
     }
+    $('#add-quadlet').disabled = !state.quadletCanAdd;
+    $('#quadlet-access').textContent = state.quadletCanAdd ? 'Rootless management enabled' : state.quadletCanControl ? 'Service controls enabled · file changes unavailable' : 'Read only inventory';
     state.quadletRows = buildQuadletRows(state.quadlets, state.containers);
     if (!silent || errors.length === 0) setNotice(errors.join(' '));
     render();
@@ -418,6 +435,29 @@ function renderDetails(id, data, logs) {
       });
       actions.append(button);
     }
+    const remove = element('button', 'action danger', 'Remove');
+    remove.type = 'button';
+    remove.disabled = ['running', 'paused', 'restarting'].includes(stateName);
+    if (remove.disabled) remove.title = 'Stop the container before removing it';
+    remove.addEventListener('click', async () => {
+      if (!confirm(`Remove container ${name}? This deletes the container but keeps its image and volumes.`)) return;
+      remove.disabled = true;
+      try {
+        await request(`/api/containers/${id}`, { method: 'DELETE' });
+        closeDetails();
+        await refresh();
+      } catch (error) {
+        setNotice(error.message);
+        remove.disabled = false;
+      }
+    });
+    actions.append(remove);
+    const convert = element('button', 'action', 'Convert to Quadlet');
+    convert.type = 'button';
+    convert.disabled = !state.quadletCanConvert;
+    if (convert.disabled) convert.title = 'Requires a writable rootless Quadlet directory and a Podman socket and user systemd bus owned by the same user';
+    convert.addEventListener('click', () => openConversion(id, convert));
+    actions.append(convert);
     control.append(actions);
   }
   const logSection = section(body, 'Recent logs');
@@ -457,11 +497,143 @@ function openQuadletDetails(entry) {
     button.addEventListener('click', () => openDetails(container.id));
     linkedSection.append(button);
   }
-  const note = section(body, 'Service lifecycle');
-  note.append(element('p', 'info', item.runtimeOnly ? 'Podman reports this container as systemd managed. Mount its Quadlet directory to show the source definition. The unit state is not available here.' : 'Quadlet services are managed by systemd. This view shows the mounted definition and any containers reported by Podman; it does not report systemd unit state.'));
+  const control = section(body, 'Service lifecycle');
+  if (!item.runtimeOnly && state.quadletCanControl) {
+    const actions = element('div', 'actions');
+    for (const action of ['start', 'stop']) {
+      const button = element('button', `action ${action === 'start' ? 'primary' : ''}`, action[0].toUpperCase() + action.slice(1));
+      button.type = 'button';
+      button.addEventListener('click', async () => {
+        button.disabled = true;
+        try {
+          await sendJson('/api/quadlets/action', 'POST', { id: item.id, action });
+          await refresh();
+          const current = state.quadletRows.find(row => row.item.id === item.id);
+          if (current) openQuadletDetails(current);
+        } catch (error) {
+          setNotice(error.message);
+          button.disabled = false;
+        }
+      });
+      actions.append(button);
+    }
+    if (item.canRemove) {
+      const remove = element('button', 'action danger', 'Remove Quadlet');
+      remove.type = 'button';
+      remove.addEventListener('click', async () => {
+        if (!confirm(`Remove ${item.name}? Its service will be stopped and the definition file deleted.`)) return;
+        remove.disabled = true;
+        try {
+          await sendJson('/api/quadlets', 'DELETE', { id: item.id });
+          closeDetails();
+          await refresh();
+        } catch (error) {
+          setNotice(error.message);
+          remove.disabled = false;
+        }
+      });
+      actions.append(remove);
+    }
+    control.append(actions);
+    control.append(element('p', 'muted', 'Service state is managed by the rootless systemd user manager.'));
+  } else {
+    control.append(element('p', 'info', item.runtimeOnly ? 'Mount this service’s Quadlet definition to manage it here.' : 'To enable service controls, mount the rootless user systemd bus and run Podmanman as that user.'));
+  }
 }
 
 $('#refresh').addEventListener('click', () => refresh());
+let conversion;
+const conversionDialog = $('#convert-dialog');
+function conversionStage(id) {
+  for (const section of ['editor', 'ready', 'done']) $(`#convert-${section}`).classList.toggle('hidden', section !== id);
+  conversionDialog.querySelectorAll('.form-error').forEach(node => node.classList.add('hidden'));
+}
+function conversionError(section, message) {
+  const node = $(`#convert-${section} .form-error`);
+  node.textContent = message;
+  node.classList.remove('hidden');
+}
+async function openConversion(id, button) {
+  button.disabled = true;
+  try {
+    const draft = await request(`/api/containers/${id}/quadlet-draft`);
+    conversion = { containerId: id };
+    $('#convert-form [name="name"]').value = draft.name;
+    $('#convert-form [name="content"]').value = draft.content;
+    const list = element('ul');
+    for (const warning of draft.warnings) list.append(element('li', '', warning));
+    $('#convert-warnings').replaceChildren(list);
+    conversionStage('editor');
+    conversionDialog.showModal();
+  } catch (error) { setNotice(error.message); }
+  finally { button.disabled = false; }
+}
+conversionDialog.querySelectorAll('.close-dialog').forEach(button => button.addEventListener('click', () => conversionDialog.close()));
+$('#convert-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const button = $('#convert-form [type="submit"]');
+  const data = Object.fromEntries(new FormData(event.currentTarget));
+  button.disabled = true;
+  try {
+    const { item } = await sendJson('/api/quadlets', 'POST', data);
+    conversion.quadletId = item.id;
+    conversion.service = item.service;
+    conversionStage('ready');
+    await refresh().catch(error => setNotice(error.message));
+  } catch (error) { conversionError('editor', error.message); }
+  finally { button.disabled = false; }
+});
+$('#convert-switch').addEventListener('click', async () => {
+  if (!confirm(`Stop the original container and start ${conversion.service}? The original will remain stopped for recovery.`)) return;
+  const button = $('#convert-switch');
+  button.disabled = true;
+  try {
+    await sendJson(`/api/containers/${conversion.containerId}/quadlet-cutover`, 'POST', { quadletId: conversion.quadletId });
+    conversionStage('done');
+    closeDetails();
+    await refresh().catch(error => setNotice(error.message));
+  } catch (error) {
+    conversionError('ready', error.message);
+    await refresh().catch(refreshError => setNotice(refreshError.message));
+  } finally { button.disabled = false; }
+});
+$('#convert-remove-original').addEventListener('click', async () => {
+  if (!confirm('Remove the stopped original container? Its image and volumes will be kept.')) return;
+  const button = $('#convert-remove-original');
+  button.disabled = true;
+  try {
+    await request(`/api/containers/${conversion.containerId}`, { method: 'DELETE' });
+    conversionDialog.close();
+    closeDetails();
+    await refresh();
+  } catch (error) { conversionError('done', error.message); }
+  finally { button.disabled = false; }
+});
+function setupFormDialog(buttonSelector, dialogSelector, formSelector, submit) {
+  const dialog = $(dialogSelector);
+  const form = $(formSelector);
+  $(buttonSelector).addEventListener('click', () => dialog.showModal());
+  dialog.querySelectorAll('.close-dialog').forEach(button => button.addEventListener('click', () => dialog.close()));
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const errorNode = form.querySelector('.form-error');
+    const submitButton = form.querySelector('[type="submit"]');
+    errorNode.classList.add('hidden');
+    submitButton.disabled = true;
+    try {
+      await submit(Object.fromEntries(new FormData(form)));
+      form.reset();
+      dialog.close();
+      await refresh();
+    } catch (error) {
+      errorNode.textContent = error.message;
+      errorNode.classList.remove('hidden');
+      await refresh();
+    } finally { submitButton.disabled = false; }
+  });
+}
+setupFormDialog('#launch-container', '#launch-dialog', '#launch-form', data => sendJson('/api/containers', 'POST', data));
+setupFormDialog('#add-quadlet', '#quadlet-dialog', '#quadlet-form', data => sendJson('/api/quadlets', 'POST', data));
 for (const table of ['containers', 'quadlets']) {
   const menu = $(`.column-menu[data-table="${table}"]`);
   const options = menu.querySelector('.column-options');

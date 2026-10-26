@@ -29,15 +29,15 @@
           <button id="quadlets-tab" class="view-tab" type="button" role="tab" aria-selected="false" aria-controls="quadlets" data-view="quadlets" tabindex="-1">Quadlets</button>
         </nav>
         <section id="containers" class="panel" role="tabpanel" aria-labelledby="containers-tab" tabindex="0">
-          <div class="panel-head"><div><h2>Direct containers</h2><p>Containers managed directly through Podman</p></div><div class="panel-tools"><label class="search-wrap"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="Search containers" aria-label="Search containers"></label><details class="column-menu" data-table="containers"><summary>Columns</summary><div class="column-options" aria-label="Container columns"></div></details></div></div>
+          <div class="panel-head"><div><h2>Direct containers</h2><p>Containers managed directly through Podman</p></div><div class="panel-tools"><label class="search-wrap"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="Search containers" aria-label="Search containers"></label><details class="column-menu" data-table="containers"><summary>Columns</summary><div class="column-options" aria-label="Container columns"></div></details><button id="launch-container" class="action primary" type="button" disabled>Launch container</button></div></div>
           <div class="filters" aria-label="Filter containers"><button class="filter active" data-filter="all" type="button">All</button><button class="filter" data-filter="running" type="button">Running</button><button class="filter" data-filter="stopped" type="button">Stopped</button></div>
           <div class="table-scroll"><table><thead><tr></tr></thead><tbody id="container-list"><tr><td class="empty">Loading containers…</td></tr></tbody></table></div>
           <div class="panel-foot"><span id="result-count">—</span><span>Refreshes every 15 seconds</span></div>
         </section>
         <section id="quadlets" class="panel" role="tabpanel" aria-labelledby="quadlets-tab" tabindex="0" hidden>
-          <div class="panel-head"><div><h2>Quadlet and systemd resources</h2><p>Definitions and detected systemd managed containers</p></div><div class="panel-tools"><label class="search-wrap"><span aria-hidden="true">⌕</span><input id="quadlet-search" type="search" placeholder="Search Quadlets" aria-label="Search Quadlets"></label><details class="column-menu" data-table="quadlets"><summary>Columns</summary><div class="column-options" aria-label="Quadlet columns"></div></details></div></div>
+          <div class="panel-head"><div><h2>Quadlet and systemd resources</h2><p>Definitions and detected systemd managed containers</p></div><div class="panel-tools"><label class="search-wrap"><span aria-hidden="true">⌕</span><input id="quadlet-search" type="search" placeholder="Search Quadlets" aria-label="Search Quadlets"></label><details class="column-menu" data-table="quadlets"><summary>Columns</summary><div class="column-options" aria-label="Quadlet columns"></div></details><button id="add-quadlet" class="action primary" type="button" disabled title="Requires a writable rootless Quadlet directory and user systemd bus">Add Quadlet</button></div></div>
           <div class="table-scroll"><table><thead><tr></tr></thead><tbody id="quadlet-list"><tr><td class="empty">Loading Quadlet definitions…</td></tr></tbody></table></div>
-          <div class="panel-foot"><span id="quadlet-result-count">—</span><span>Read only inventory</span></div>
+          <div class="panel-foot"><span id="quadlet-result-count">—</span><span id="quadlet-access">Read only inventory</span></div>
         </section>
       </div>
     </main>
@@ -47,5 +47,50 @@
     <div class="drawer-top"><div><div class="eyebrow">CONTAINER DETAILS</div><h2 id="detail-name">Container</h2></div><button id="close-drawer" class="icon-button" type="button" aria-label="Close details">×</button></div>
     <div id="detail-body" class="drawer-body"></div>
   </aside>
+  <dialog id="launch-dialog" class="form-dialog" aria-labelledby="launch-title">
+    <form id="launch-form">
+      <div class="dialog-head"><h2 id="launch-title">Launch container</h2><button class="icon-button close-dialog" type="button" aria-label="Close">×</button></div>
+      <p class="dialog-intro">Launch an image already available in Podman. Published ports bind to 127.0.0.1 on the host.</p>
+      <label class="form-field">Image <input name="image" required placeholder="docker.io/library/nginx:latest" autocomplete="off"></label>
+      <label class="form-field">Name <span class="field-hint">optional</span><input name="name" placeholder="web" autocomplete="off"></label>
+      <label class="form-field">Published ports <span class="field-hint">one host:container[/protocol] per line</span><textarea name="ports" rows="2" placeholder="8080:80"></textarea></label>
+      <label class="form-field">Mounts <span class="field-hint">one source:destination[:ro] per line; paths are on the Podman host</span><textarea name="mounts" rows="2" placeholder="web-data:/data"></textarea></label>
+      <p class="form-error hidden" role="alert"></p>
+      <div class="dialog-actions"><button class="action close-dialog" type="button">Cancel</button><button class="action primary" type="submit">Launch</button></div>
+    </form>
+  </dialog>
+  <dialog id="quadlet-dialog" class="form-dialog" aria-labelledby="quadlet-title">
+    <form id="quadlet-form">
+      <div class="dialog-head"><h2 id="quadlet-title">Add Quadlet</h2><button class="icon-button close-dialog" type="button" aria-label="Close">×</button></div>
+      <p class="dialog-intro">Save a new rootless Quadlet definition. It will appear after the user systemd manager reloads; start it from its detail view. Quadlet directives run with your user privileges.</p>
+      <label class="form-field">Filename <input name="name" required placeholder="web.container" autocomplete="off"></label>
+      <label class="form-field">Definition <textarea name="content" required rows="10" spellcheck="false" placeholder="[Container]&#10;Image=docker.io/library/nginx:latest&#10;PublishPort=8080:80"></textarea></label>
+      <p class="form-error hidden" role="alert"></p>
+      <div class="dialog-actions"><button class="action close-dialog" type="button">Cancel</button><button class="action primary" type="submit">Add Quadlet</button></div>
+    </form>
+  </dialog>
+  <dialog id="convert-dialog" class="form-dialog" aria-labelledby="convert-title">
+    <div class="dialog-head"><h2 id="convert-title">Convert to Quadlet</h2><button class="icon-button close-dialog" type="button" aria-label="Close">×</button></div>
+    <div id="convert-editor">
+      <p class="dialog-intro">Review this draft before saving. Environment values and other settings may need to be added manually. Saving leaves the original container running. The replacement uses Quadlet's generated container name.</p>
+      <div id="convert-warnings" class="conversion-warnings"></div>
+      <form id="convert-form">
+        <label class="form-field">Filename <input name="name" required autocomplete="off"></label>
+        <label class="form-field">Quadlet definition <textarea name="content" required rows="14" spellcheck="false"></textarea></label>
+        <p class="form-error hidden" role="alert"></p>
+        <div class="dialog-actions"><button class="action close-dialog" type="button">Cancel</button><button class="action primary" type="submit">Save draft</button></div>
+      </form>
+    </div>
+    <div id="convert-ready" class="hidden">
+      <p class="dialog-intro">The Quadlet is saved without automatic startup. Switching stops the original container, starts the new service, and enables it for future user sessions. The original stays available, stopped, for recovery.</p>
+      <p class="form-error hidden" role="alert"></p>
+      <div class="dialog-actions"><button class="action close-dialog" type="button">Switch later</button><button id="convert-switch" class="action primary" type="button">Switch to Quadlet</button></div>
+    </div>
+    <div id="convert-done" class="hidden">
+      <p class="dialog-intro">The Quadlet service started. Verify the replacement before removing the stopped original container.</p>
+      <p class="form-error hidden" role="alert"></p>
+      <div class="dialog-actions"><button class="action close-dialog" type="button">Keep original</button><button id="convert-remove-original" class="action danger" type="button">Remove original</button></div>
+    </div>
+  </dialog>
 </body>
 </html>

@@ -3,6 +3,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { listQuadlets } from './quadlets.js';
+import { addQuadlet, canRemoveQuadlet, controlQuadlet, enableQuadletOnLogin, removeQuadlet, runUserSystemctl, userManagerAvailable, writableQuadletDir } from './quadlet-admin.js';
+import { createContainerSpec } from './container-admin.js';
+import { createQuadletDraft } from './container-conversion.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(root, 'public');
@@ -10,9 +13,11 @@ const socketPath = process.env.PODMAN_SOCKET || '/run/podman/podman.sock';
 const host = process.env.HOST || '127.0.0.1';
 const port = Number(process.env.PORT || 3000);
 const maxResponseBytes = 2 * 1024 * 1024;
+const maxRequestBytes = 40 * 1024;
 const actions = new Set(['start', 'stop', 'restart']);
 const types = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8' };
 let apiVersionPromise;
+const cutovers = new Set();
 
 export function isContainerId(value) {
   return /^[a-f0-9]{12,64}$/i.test(value);
@@ -61,9 +66,11 @@ export function decodeLogStream(buffer) {
   return offset === buffer.length ? Buffer.concat(chunks).toString('utf8') : buffer.toString('utf8');
 }
 
-export function podmanRequest(apiPath, method = 'GET') {
+export function podmanRequest(apiPath, method = 'GET', body, timeoutMs = 10000) {
   return new Promise((resolve, reject) => {
-    const request = http.request({ socketPath, path: apiPath, method, timeout: 10000 }, response => {
+    const payload = body == null ? null : JSON.stringify(body);
+    const headers = payload == null ? {} : { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) };
+    const request = http.request({ socketPath, path: apiPath, method, headers, timeout: timeoutMs }, response => {
       const chunks = [];
       let size = 0;
       response.on('data', chunk => {
@@ -82,11 +89,11 @@ export function podmanRequest(apiPath, method = 'GET') {
     });
     request.on('timeout', () => request.destroy(new Error('Podman request timed out')));
     request.on('error', reject);
-    request.end();
+    request.end(payload);
   });
 }
 
-async function libpodRequest(apiPath, method = 'GET') {
+async function libpodRequest(apiPath, method = 'GET', body, timeoutMs = 10000) {
   if (!apiVersionPromise) {
     apiVersionPromise = podmanRequest('/version').then(result => {
       if (result.status !== 200) throw new Error(`Podman version request returned ${result.status}`);
@@ -97,7 +104,7 @@ async function libpodRequest(apiPath, method = 'GET') {
     }).catch(error => { apiVersionPromise = undefined; throw error; });
   }
   const version = await apiVersionPromise;
-  return podmanRequest(`/v${version}/libpod${apiPath}`, method);
+  return podmanRequest(`/v${version}/libpod${apiPath}`, method, body, timeoutMs);
 }
 
 function json(response, status, data) {
@@ -110,6 +117,30 @@ function podmanError(result) {
   catch { return `Podman returned ${result.status}`; }
 }
 
+function httpError(status, message) {
+  return Object.assign(new Error(message), { status });
+}
+
+function checkOrigin(request) {
+  const origin = request.headers.origin;
+  if (origin && origin !== `http://${request.headers.host}` && origin !== `https://${request.headers.host}`) {
+    throw httpError(403, 'Cross-origin requests are not allowed');
+  }
+}
+
+async function readJson(request) {
+  if (request.headers['content-type']?.split(';')[0].trim() !== 'application/json') throw httpError(415, 'JSON content type is required');
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > maxRequestBytes) throw httpError(413, 'Request body is too large');
+    chunks.push(chunk);
+  }
+  try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+  catch { throw httpError(400, 'Invalid JSON body'); }
+}
+
 async function inspect(id) {
   const result = await libpodRequest(`/containers/${id}/json`);
   if (result.status >= 400) return { error: podmanError(result), status: result.status === 404 ? 404 : 502 };
@@ -120,6 +151,11 @@ async function inspect(id) {
 function isSystemdManaged(data) {
   const labels = data?.Config?.Labels || data?.Labels || {};
   return Boolean(labels.PODMAN_SYSTEMD_UNIT || labels['io.containers.systemd.unit']);
+}
+
+function sameUserPodmanSocket() {
+  try { return process.getuid?.() !== 0 && fs.statSync(socketPath).uid === process.getuid(); }
+  catch { return false; }
 }
 
 function publicInspect(data) {
@@ -143,7 +179,43 @@ function publicInspect(data) {
 
 async function api(request, response, url) {
   if (request.method === 'GET' && url.pathname === '/api/quadlets') {
-    return json(response, 200, await listQuadlets());
+    const inventory = await listQuadlets();
+    const directory = await writableQuadletDir(inventory);
+    const definitions = await Promise.all(inventory.definitions.map(async item => ({ ...item, canRemove: await canRemoveQuadlet(item, directory) })));
+    return json(response, 200, { ...inventory, definitions, canControl: userManagerAvailable(), canAdd: Boolean(directory), canConvert: Boolean(directory && sameUserPodmanSocket()) });
+  }
+  if (url.pathname === '/api/quadlets' && request.method === 'POST') {
+    checkOrigin(request);
+    const input = await readJson(request);
+    if (!input || typeof input !== 'object') throw httpError(400, 'Invalid Quadlet settings');
+    await addQuadlet(await listQuadlets(), input.name, input.content);
+    const inventory = await listQuadlets();
+    const directory = await writableQuadletDir(inventory);
+    const item = inventory.definitions.find(definition => definition.name === input.name && path.dirname(definition.path) === directory);
+    if (!item) throw httpError(503, 'Quadlet was saved, but its definition could not be found after reload.');
+    return json(response, 201, { item });
+  }
+  if (url.pathname === '/api/quadlets' && request.method === 'DELETE') {
+    checkOrigin(request);
+    const input = await readJson(request);
+    if (!input || typeof input !== 'object') throw httpError(400, 'Invalid Quadlet settings');
+    const inventory = await listQuadlets();
+    const item = inventory.definitions.find(definition => definition.id === input.id);
+    if (!item) return json(response, 404, { error: 'Quadlet definition not found' });
+    if (inventory.definitions.filter(definition => definition.service === item.service).length !== 1) return json(response, 409, { error: 'Multiple Quadlets use this service name' });
+    await removeQuadlet(item, await writableQuadletDir(inventory));
+    return json(response, 200, { ok: true });
+  }
+  if (url.pathname === '/api/quadlets/action' && request.method === 'POST') {
+    checkOrigin(request);
+    const input = await readJson(request);
+    if (!input || !['start', 'stop'].includes(input.action)) throw httpError(400, 'Invalid Quadlet action');
+    const inventory = await listQuadlets();
+    const item = inventory.definitions.find(definition => definition.id === input.id);
+    if (!item) return json(response, 404, { error: 'Quadlet definition not found' });
+    if (inventory.definitions.filter(definition => definition.service === item.service).length !== 1) return json(response, 409, { error: 'Multiple Quadlets use this service name' });
+    await controlQuadlet(item, input.action);
+    return json(response, 200, { ok: true });
   }
   if (request.method === 'GET' && url.pathname === '/api/health') {
     const result = await podmanRequest('/_ping');
@@ -172,8 +244,23 @@ async function api(request, response, url) {
       return json(response, 200, { containers });
     } catch { return json(response, 502, { error: 'Podman returned invalid container data' }); }
   }
+  if (request.method === 'POST' && url.pathname === '/api/containers') {
+    checkOrigin(request);
+    let spec;
+    try { spec = createContainerSpec(await readJson(request)); }
+    catch (error) { if (error.status) throw error; throw httpError(400, error.message); }
+    const created = await libpodRequest('/containers/create', 'POST', spec);
+    if (created.status >= 400) return json(response, created.status === 404 ? 422 : 502, { error: podmanError(created) });
+    let id;
+    try { id = JSON.parse(created.body).Id; }
+    catch { /* Fall through to a clear response. */ }
+    if (!isContainerId(id)) return json(response, 502, { error: 'Podman created a container but returned no valid ID' });
+    const started = await libpodRequest(`/containers/${id}/start`, 'POST');
+    if (started.status >= 400) return json(response, 502, { error: `Container was created but could not start: ${podmanError(started)}`, id });
+    return json(response, 201, { id });
+  }
 
-  const match = /^\/api\/containers\/([^/]+)(?:\/(logs|start|stop|restart))?$/.exec(url.pathname);
+  const match = /^\/api\/containers\/([^/]+)(?:\/(logs|start|stop|restart|quadlet-draft|quadlet-cutover))?$/.exec(url.pathname);
   if (!match || !isContainerId(match[1])) return json(response, 404, { error: 'Not found' });
   const [, id, operation] = match;
   if (request.method === 'GET' && !operation) {
@@ -185,15 +272,81 @@ async function api(request, response, url) {
     if (result.status >= 400) return json(response, result.status === 404 ? 404 : 502, { error: podmanError(result) });
     return json(response, 200, { logs: decodeLogStream(result.raw) });
   }
+  if (request.method === 'GET' && operation === 'quadlet-draft') {
+    const current = await inspect(id);
+    if (current.error) return json(response, current.status, { error: current.error });
+    if (isSystemdManaged(current.data)) return json(response, 409, { error: 'This container is already managed by systemd.' });
+    try { return json(response, 200, createQuadletDraft(current.data)); }
+    catch (error) { return json(response, 422, { error: error.message }); }
+  }
+  if (request.method === 'POST' && operation === 'quadlet-cutover') {
+    checkOrigin(request);
+    const input = await readJson(request);
+    if (typeof input?.quadletId !== 'string') throw httpError(400, 'Select a saved Quadlet definition.');
+    if (cutovers.has(id)) return json(response, 409, { error: 'A cutover is already in progress for this container.' });
+    cutovers.add(id);
+    try {
+      if (!userManagerAvailable() || !sameUserPodmanSocket()) throw httpError(409, 'Cutover requires a rootless Podman socket and user systemd bus owned by the same user.');
+      const current = await inspect(id);
+      if (current.error) return json(response, current.status, { error: current.error });
+      if (isSystemdManaged(current.data)) return json(response, 409, { error: 'This container is already managed by systemd.' });
+      if (current.data.Pod) return json(response, 409, { error: 'Containers in a Pod need a coordinated Pod and container Quadlet conversion.' });
+      const state = current.data.State?.Status;
+      if (!['running', 'exited', 'created', 'configured', 'stopped'].includes(state)) return json(response, 409, { error: `Stop or unpause the container before switching (current state: ${state || 'unknown'}).` });
+      const inventory = await listQuadlets();
+      const item = inventory.definitions.find(definition => definition.id === input.quadletId);
+      const directory = await writableQuadletDir(inventory);
+      if (!item || item.kind !== 'container' || !await canRemoveQuadlet(item, directory)) return json(response, 409, { error: 'Select a rootless container Quadlet in the writable directory.' });
+      if (inventory.definitions.filter(definition => definition.service === item.service).length !== 1) return json(response, 409, { error: 'Multiple Quadlets use this service name.' });
+      const wasRunning = state === 'running';
+      if (wasRunning) {
+        try {
+          const stopped = await libpodRequest(`/containers/${id}/stop`, 'POST', undefined, 45000);
+          if (stopped.status >= 400) throw new Error(podmanError(stopped));
+        } catch (error) {
+          const latest = await inspect(id).catch(() => ({}));
+          if (latest.data?.State?.Status === 'running') return json(response, 502, { error: `Could not stop the original container: ${error.message}. It is still running.` });
+          try {
+            const restarted = await libpodRequest(`/containers/${id}/start`, 'POST', undefined, 30000);
+            if (restarted.status >= 400) throw new Error(podmanError(restarted));
+            return json(response, 502, { error: `Could not confirm the original container stopped: ${error.message}. It was restarted.` });
+          } catch (restartError) {
+            return json(response, 502, { error: `Could not stop the original container: ${error.message}. Restarting it also failed: ${restartError.message}` });
+          }
+        }
+      }
+      try {
+        await controlQuadlet(item, 'start');
+        const { stdout } = await runUserSystemctl(['is-active', item.service], [3, 4]);
+        if (stdout.trim() !== 'active') throw new Error(`Service ${item.service} is not active after starting.`);
+        await enableQuadletOnLogin(item, directory);
+      } catch (error) {
+        await controlQuadlet(item, 'stop').catch(() => {});
+        if (wasRunning) {
+          const restarted = await libpodRequest(`/containers/${id}/start`, 'POST', undefined, 30000);
+          if (restarted.status >= 400) return json(response, 502, { error: `Quadlet failed to start: ${error.message}. Restarting the original container also failed: ${podmanError(restarted)}` });
+        }
+        return json(response, 502, { error: `Quadlet failed to start: ${error.message}. The original container ${wasRunning ? 'was restarted' : 'remains stopped'}.` });
+      }
+      return json(response, 200, { ok: true, service: item.service, originalId: id, originalRetained: true });
+    } finally { cutovers.delete(id); }
+  }
+  if (request.method === 'DELETE' && !operation) {
+    checkOrigin(request);
+    const current = await inspect(id);
+    if (current.error) return json(response, current.status, { error: current.error });
+    if (isSystemdManaged(current.data)) return json(response, 409, { error: 'This container is managed by systemd. Remove its Quadlet definition instead.' });
+    if (['running', 'paused', 'restarting'].includes(current.data.State?.Status)) return json(response, 409, { error: 'Stop the container before removing it.' });
+    const result = await libpodRequest(`/containers/${id}?force=false&v=false`, 'DELETE');
+    if (result.status >= 400) return json(response, result.status === 404 ? 404 : 502, { error: podmanError(result) });
+    return json(response, 200, { ok: true });
+  }
   if (request.method === 'POST' && actions.has(operation)) {
-    const origin = request.headers.origin;
-    if (origin && origin !== `http://${request.headers.host}` && origin !== `https://${request.headers.host}`) {
-      return json(response, 403, { error: 'Cross-origin requests are not allowed' });
-    }
+    checkOrigin(request);
     const current = await inspect(id);
     if (current.error) return json(response, current.status, { error: current.error });
     if (isSystemdManaged(current.data)) return json(response, 409, { error: 'This container is managed by systemd. Use its service unit for lifecycle actions.' });
-    const result = await libpodRequest(`/containers/${id}/${operation}`, 'POST');
+    const result = await libpodRequest(`/containers/${id}/${operation}`, 'POST', undefined, ['stop', 'restart'].includes(operation) ? 45000 : 10000);
     if (result.status >= 400) return json(response, result.status === 404 ? 404 : 502, { error: podmanError(result) });
     return json(response, 200, { ok: true });
   }
@@ -213,9 +366,11 @@ export function createServer() {
       response.end(request.method === 'HEAD' ? undefined : content);
     } catch (error) {
       let message = error.message;
-      if (error.code === 'ECONNREFUSED') message = `Podman socket at ${socketPath} refused the connection. Check that the mounted socket is active on this host or Podman machine.`;
-      if (error.code === 'ENOENT' || error.code === 'EACCES') message = `Cannot access Podman socket at ${socketPath} (${error.code}).`;
-      json(response, 503, { error: message });
+      if (url.pathname.startsWith('/api/containers') || url.pathname === '/api/health') {
+        if (error.code === 'ECONNREFUSED') message = `Podman socket at ${socketPath} refused the connection. Check that the mounted socket is active on this host or Podman machine.`;
+        if (error.code === 'ENOENT' || error.code === 'EACCES') message = `Cannot access Podman socket at ${socketPath} (${error.code}).`;
+      }
+      json(response, error.status || 503, { error: message });
     }
   });
 }
