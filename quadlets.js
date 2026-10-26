@@ -3,8 +3,8 @@ import path from 'node:path';
 
 const kinds = new Set(['container', 'pod', 'network', 'volume', 'image', 'build', 'artifact', 'kube']);
 const fieldsByKind = {
-  container: ['Image', 'ContainerName', 'Pod', 'Network', 'PublishPort', 'AutoUpdate'],
-  pod: ['PodName', 'Network', 'PublishPort'],
+  container: ['Image', 'ContainerName', 'Pod', 'Network', 'PublishPort', 'Volume', 'Mount', 'AutoUpdate'],
+  pod: ['PodName', 'Network', 'PublishPort', 'Volume'],
   network: ['NetworkName', 'Driver', 'Subnet', 'Gateway'],
   volume: ['VolumeName', 'Driver', 'Device'],
   image: ['Image', 'ImageTag'],

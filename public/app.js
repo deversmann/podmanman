@@ -1,5 +1,21 @@
 const $ = selector => document.querySelector(selector);
-const state = { containers: [], quadlets: [], quadletRows: [], quadletConfigured: null, filter: 'all', query: '', quadletQuery: '', selected: null, loading: false, sort: { containers: { key: 'name', direction: 'asc' }, quadlets: { key: 'name', direction: 'asc' } } };
+const columnDefinitions = {
+  containers: [{ key: 'name', label: 'Name' }, { key: 'image', label: 'Image' }, { key: 'status', label: 'Status' }, { key: 'source', label: 'Source' }, { key: 'ports', label: 'Ports' }, { key: 'mounts', label: 'Volume mounts', defaultVisible: false }],
+  quadlets: [{ key: 'name', label: 'Resource / container' }, { key: 'type', label: 'Type' }, { key: 'service', label: 'Service' }, { key: 'image', label: 'Image' }, { key: 'status', label: 'Status' }, { key: 'mounts', label: 'Volume mounts', defaultVisible: false }]
+};
+function savedColumns(table) {
+  const defaults = columnDefinitions[table].filter(column => column.defaultVisible !== false).map(column => column.key);
+  try {
+    const value = JSON.parse(localStorage.getItem(`podmanman.columns.${table}`));
+    if (Array.isArray(value)) {
+      const known = new Set(columnDefinitions[table].map(column => column.key));
+      const selected = [...new Set(value.filter(key => known.has(key)))];
+      if (selected.length) return selected;
+    }
+  } catch { /* Private browsing can disable local storage. */ }
+  return defaults;
+}
+const state = { containers: [], quadlets: [], quadletRows: [], quadletConfigured: null, filter: 'all', query: '', quadletQuery: '', selected: null, loading: false, pendingRefresh: false, columns: { containers: savedColumns('containers'), quadlets: savedColumns('quadlets') }, sort: { containers: { key: 'name', direction: 'asc' }, quadlets: { key: 'name', direction: 'asc' } } };
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
 function element(tag, className, text) {
@@ -47,6 +63,7 @@ function sortRows(rows, sort, valueFor) {
 
 function containerSortValue(item, key) {
   if (key === 'ports') return item.ports?.length ? formatPorts(item.ports) : '';
+  if (key === 'mounts') return formatMounts(item.mounts);
   if (key === 'source') return 'Podman';
   if (key === 'status') return item.state;
   return item[key];
@@ -61,6 +78,81 @@ function updateSortHeaders(table) {
     const button = header.querySelector('button');
     button.title = `Sort by ${button.firstChild.textContent.trim()} ${active && sort.direction === 'asc' ? 'descending' : 'ascending'}`;
   }
+}
+
+function renderHeaders(table) {
+  const row = $(`#${table} thead tr`);
+  row.replaceChildren();
+  for (const column of columnDefinitions[table].filter(item => state.columns[table].includes(item.key))) {
+    const header = element('th', 'sortable');
+    header.dataset.sortKey = column.key;
+    header.setAttribute('aria-sort', 'none');
+    const button = element('button', 'sort-button', column.label.toUpperCase());
+    button.type = 'button';
+    button.append(element('span', 'sort-indicator'));
+    button.querySelector('.sort-indicator').setAttribute('aria-hidden', 'true');
+    button.addEventListener('click', () => {
+      const sort = state.sort[table];
+      sort.direction = sort.key === column.key && sort.direction === 'asc' ? 'desc' : 'asc';
+      sort.key = column.key;
+      updateSortHeaders(table);
+      if (table === 'containers') render();
+      else renderQuadlets();
+    });
+    header.append(button);
+    row.append(header);
+  }
+  const action = element('th');
+  action.setAttribute('aria-label', 'Actions');
+  row.append(action);
+  updateSortHeaders(table);
+}
+
+function emptyRow(body, message, table) {
+  const row = element('tr');
+  const cell = element('td', 'empty', message);
+  cell.colSpan = state.columns[table].length + 1;
+  row.append(cell);
+  body.append(row);
+}
+
+function viewCell(onClick) {
+  const cell = element('td');
+  const button = element('button', 'view-button', 'View →');
+  button.type = 'button';
+  button.addEventListener('click', onClick);
+  cell.append(button);
+  return cell;
+}
+
+function mountCell(value) {
+  const cell = element('td', 'mount-cell', value);
+  cell.title = value;
+  return cell;
+}
+
+function containerCell(item, key) {
+  if (key === 'name') {
+    const cell = element('td');
+    const button = element('button', 'name-button', item.name || item.id.slice(0, 12));
+    button.type = 'button';
+    button.addEventListener('click', () => openDetails(item.id));
+    cell.append(button, element('span', 'container-id', item.id.slice(0, 12)));
+    return cell;
+  }
+  if (key === 'image') {
+    const cell = element('td', 'image-cell', item.image || '—');
+    cell.title = item.image || '';
+    return cell;
+  }
+  if (key === 'status') {
+    const cell = element('td');
+    cell.append(element('span', `badge ${stateClass(item.state)}`, item.state || 'unknown'));
+    return cell;
+  }
+  if (key === 'source') return element('td', 'source', 'Podman');
+  if (key === 'ports') return element('td', '', formatPorts(item.ports));
+  return mountCell(item.mounts === null ? 'Unavailable' : formatMounts(item.mounts) || '—');
 }
 
 function render() {
@@ -81,33 +173,12 @@ function render() {
   body.replaceChildren();
   renderQuadlets();
   if (!filtered.length) {
-    const row = element('tr');
-    const cell = element('td', 'empty', containers.length ? 'No containers match your filters.' : 'No containers found. Create one with Podman and refresh.');
-    cell.colSpan = 6;
-    row.append(cell);
-    body.append(row);
+    emptyRow(body, containers.length ? 'No containers match your filters.' : 'No containers found. Create one with Podman and refresh.', 'containers');
     return;
   }
   for (const item of filtered) {
     const row = element('tr');
-    const nameCell = element('td');
-    const name = element('button', 'name-button', item.name || item.id.slice(0, 12));
-    name.type = 'button';
-    name.addEventListener('click', () => openDetails(item.id));
-    nameCell.append(name, element('span', 'container-id', item.id.slice(0, 12)));
-    const image = element('td', 'image-cell', item.image || '—');
-    image.title = item.image || '';
-    const statusCell = element('td');
-    const badge = element('span', `badge ${stateClass(item.state)}`, item.state || 'unknown');
-    statusCell.append(badge);
-    const source = element('td', 'source', 'Podman');
-    const ports = element('td', '', formatPorts(item.ports));
-    const viewCell = element('td');
-    const view = element('button', 'view-button', 'View →');
-    view.type = 'button';
-    view.addEventListener('click', () => openDetails(item.id));
-    viewCell.append(view);
-    row.append(nameCell, image, statusCell, source, ports, viewCell);
+    row.append(...state.columns.containers.map(key => containerCell(item, key)), viewCell(() => openDetails(item.id)));
     body.append(row);
   }
 }
@@ -145,8 +216,13 @@ function buildQuadletRows(definitions, containers) {
       ? linked[0]?.image || item.fields.find(field => field.label === 'Image' || field.label === 'ImageTag')?.value || ''
       : '';
     const status = linked.length === 1 ? linked[0].state : linked.length ? `${linked.length} linked` : ['container', 'kube'].includes(item.kind) ? 'No container' : '—';
+    const declaredMounts = item.fields.filter(field => field.label === 'Volume' || field.label === 'Mount').map(field => field.value);
+    const runtimeMounts = linked.length && linked.every(container => container.mounts !== null)
+      ? linked.flatMap(container => container.mounts)
+      : null;
+    const mounts = runtimeMounts?.length ? formatMounts(runtimeMounts) : declaredMounts.join(', ');
     return {
-      item, linked, name, secondaryName, image, status,
+      item, linked, name, secondaryName, image, status, mounts,
       statusClass: linked.some(container => container.state === 'running') ? 'running' : 'stopped',
       searchText: `${item.name} ${item.kind} ${item.service} ${item.description} ${linked.map(container => container.name).join(' ')}`.toLowerCase()
     };
@@ -160,64 +236,65 @@ function quadletSortValue(row, key) {
   return row[key];
 }
 
+function quadletCell(entry, key) {
+  if (key === 'name') {
+    const cell = element('td');
+    const button = element('button', 'name-button', entry.name);
+    button.type = 'button';
+    button.addEventListener('click', () => openQuadletDetails(entry));
+    cell.append(button, element('span', 'container-id', entry.secondaryName));
+    return cell;
+  }
+  if (key === 'type') {
+    const cell = element('td');
+    cell.append(element('span', 'kind-badge', entry.item.kind));
+    return cell;
+  }
+  if (key === 'service') return element('td', 'mono-cell', entry.item.service);
+  if (key === 'image') {
+    const cell = element('td', 'image-cell', entry.image || '—');
+    cell.title = entry.image;
+    return cell;
+  }
+  if (key === 'status') {
+    const cell = element('td');
+    if (entry.linked.length) cell.append(element('span', `badge ${entry.statusClass}`, entry.status));
+    else cell.textContent = entry.status;
+    return cell;
+  }
+  return mountCell(entry.mounts || '—');
+}
+
 function renderQuadlets() {
   const body = $('#quadlet-list');
   body.replaceChildren();
   const items = state.quadletRows;
   if (state.quadletConfigured === null && !items.length) {
-    const row = element('tr');
-    const cell = element('td', 'empty', 'Quadlet inventory unavailable.');
-    cell.colSpan = 6;
-    row.append(cell);
-    body.append(row);
+    emptyRow(body, 'Quadlet inventory unavailable.', 'quadlets');
     $('#quadlet-result-count').textContent = 'Inventory unavailable';
     return;
   }
   if (!state.quadletConfigured && !items.length) {
-    const row = element('tr');
-    const cell = element('td', 'empty', 'Mount a Quadlet directory to /quadlets to display definitions and resources.');
-    cell.colSpan = 6;
-    row.append(cell);
-    body.append(row);
+    emptyRow(body, 'Mount a Quadlet directory to /quadlets to display definitions and resources.', 'quadlets');
     $('#quadlet-result-count').textContent = 'No Quadlet directory mounted';
     return;
   }
   const filtered = sortRows(items.filter(item => item.searchText.includes(state.quadletQuery)), state.sort.quadlets, quadletSortValue);
   $('#quadlet-result-count').textContent = `Showing ${filtered.length} of ${items.length} resources`;
   if (!filtered.length) {
-    const row = element('tr');
-    const cell = element('td', 'empty', items.length ? 'No Quadlet resources match your search.' : 'No Quadlet definitions found in the mounted directories.');
-    cell.colSpan = 6;
-    row.append(cell);
-    body.append(row);
+    emptyRow(body, items.length ? 'No Quadlet resources match your search.' : 'No Quadlet definitions found in the mounted directories.', 'quadlets');
     return;
   }
   for (const entry of filtered) {
     const row = element('tr');
-    const nameCell = element('td');
-    const name = element('button', 'name-button', entry.name);
-    name.type = 'button';
-    name.addEventListener('click', () => openQuadletDetails(entry));
-    nameCell.append(name, element('span', 'container-id', entry.secondaryName));
-    const kind = element('td');
-    kind.append(element('span', 'kind-badge', entry.item.kind));
-    const service = element('td', 'mono-cell', entry.item.service);
-    const imageCell = element('td', 'image-cell', entry.image || '—');
-    imageCell.title = entry.image;
-    const container = element('td');
-    if (entry.linked.length) {
-      container.append(element('span', `badge ${entry.statusClass}`, entry.status));
-    } else {
-      container.textContent = entry.status;
-    }
-    const viewCell = element('td');
-    const view = element('button', 'view-button', 'View →');
-    view.type = 'button';
-    view.addEventListener('click', () => openQuadletDetails(entry));
-    viewCell.append(view);
-    row.append(nameCell, kind, service, imageCell, container, viewCell);
+    row.append(...state.columns.quadlets.map(key => quadletCell(entry, key)), viewCell(() => openQuadletDetails(entry)));
     body.append(row);
   }
+}
+
+function formatMounts(mounts) {
+  if (!Array.isArray(mounts)) return '';
+  return mounts.map(mount => `${mount.source || mount.type || 'mount'} → ${mount.destination || '—'}`).join(', ');
 }
 
 function formatPorts(ports) {
@@ -226,11 +303,12 @@ function formatPorts(ports) {
 }
 
 async function refresh(silent = false) {
-  if (state.loading) return;
+  if (state.loading) { if (!silent) state.pendingRefresh = true; return; }
   state.loading = true;
   $('#refresh').disabled = true;
   try {
-    const [containers, quadlets] = await Promise.allSettled([request('/api/containers'), request('/api/quadlets')]);
+    const mounts = state.columns.containers.includes('mounts') || state.columns.quadlets.includes('mounts');
+    const [containers, quadlets] = await Promise.allSettled([request(`/api/containers${mounts ? '?mounts=true' : ''}`), request('/api/quadlets')]);
     const errors = [];
     if (containers.status === 'fulfilled') {
       state.containers = containers.value.containers;
@@ -252,6 +330,10 @@ async function refresh(silent = false) {
   } finally {
     state.loading = false;
     $('#refresh').disabled = false;
+    if (state.pendingRefresh) {
+      state.pendingRefresh = false;
+      refresh();
+    }
   }
 }
 
@@ -381,17 +463,45 @@ function openQuadletDetails(entry) {
 
 $('#refresh').addEventListener('click', () => refresh());
 for (const table of ['containers', 'quadlets']) {
-  updateSortHeaders(table);
-  document.querySelectorAll(`#${table} th.sortable`).forEach(header => header.querySelector('button').addEventListener('click', () => {
-    const sort = state.sort[table];
-    const key = header.dataset.sortKey;
-    sort.direction = sort.key === key && sort.direction === 'asc' ? 'desc' : 'asc';
-    sort.key = key;
-    updateSortHeaders(table);
-    if (table === 'containers') render();
-    else renderQuadlets();
-  }));
+  const menu = $(`.column-menu[data-table="${table}"]`);
+  const options = menu.querySelector('.column-options');
+  const syncOptions = () => {
+    for (const input of options.querySelectorAll('input')) {
+      input.checked = state.columns[table].includes(input.value);
+      input.disabled = input.checked && state.columns[table].length === 1;
+    }
+  };
+  for (const column of columnDefinitions[table]) {
+    const label = element('label', 'column-option');
+    const input = element('input');
+    input.type = 'checkbox';
+    input.value = column.key;
+    input.setAttribute('aria-label', column.label);
+    label.append(input, element('span', '', column.label));
+    input.addEventListener('change', () => {
+      const oldMounts = state.columns.containers.includes('mounts') || state.columns.quadlets.includes('mounts');
+      if (input.checked) state.columns[table].push(column.key);
+      else state.columns[table] = state.columns[table].filter(key => key !== column.key);
+      const visible = columnDefinitions[table].map(item => item.key).filter(key => state.columns[table].includes(key));
+      state.columns[table] = visible;
+      if (!visible.includes(state.sort[table].key)) state.sort[table] = { key: visible[0], direction: 'asc' };
+      try { localStorage.setItem(`podmanman.columns.${table}`, JSON.stringify(visible)); } catch { /* Storage is optional. */ }
+      syncOptions();
+      renderHeaders(table);
+      render();
+      const mounts = state.columns.containers.includes('mounts') || state.columns.quadlets.includes('mounts');
+      if (mounts && !oldMounts) refresh();
+    });
+    options.append(label);
+  }
+  syncOptions();
+  renderHeaders(table);
 }
+document.addEventListener('click', event => {
+  for (const menu of document.querySelectorAll('.column-menu[open]')) {
+    if (!menu.contains(event.target)) menu.open = false;
+  }
+});
 $('#search').addEventListener('input', event => { state.query = event.target.value.trim().toLowerCase(); render(); });
 $('#quadlet-search').addEventListener('input', event => { state.quadletQuery = event.target.value.trim().toLowerCase(); renderQuadlets(); });
 function showView(view, updateHash = false) {

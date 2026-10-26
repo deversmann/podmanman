@@ -9,6 +9,7 @@ A small web dashboard for containers and Quadlet resources on a Podman host. It 
 - Shows state, image, ports, inspect details, and the latest 200 log lines.
 - Searches and filters containers.
 - Sorts the Containers and Quadlets tables independently by clicking a column heading. Click again to reverse the order; an arrow marks the active column and direction. Each choice stays in place as the data refreshes.
+- Use each table's **Columns** menu to show or hide columns, including **Volume mounts**. Choices are saved separately in the browser for the two tables. At least one data column stays visible.
 - Starts, stops, and restarts containers managed directly through Podman.
 - Identifies systemd managed containers through the `PODMAN_SYSTEMD_UNIT` label and points users to their service unit. Their lifecycle controls are intentionally handled by systemd.
 - Displays read only Quadlet definitions for containers, pods, networks, volumes, images, builds, artifacts, and Kubernetes deployments. These remain visible before their service creates a Podman resource.
@@ -16,6 +17,8 @@ A small web dashboard for containers and Quadlet resources on a Podman host. It 
 - Places systemd managed containers in the Quadlet and systemd section. When a definition directory is not mounted, it still shows the service and container details reported by Podman.
 
 The direct container list only includes objects that currently exist in Podman and are not marked as systemd managed. The Quadlet and systemd section lists definitions from mounted directories and links current containers by service label. It does not report systemd unit state or edit definitions.
+
+When the Volume mounts column is enabled, Podmanman inspects existing containers to show mount sources and destinations. Named volumes use their volume name. Quadlet rows show the linked container's actual mounts when available, or declared `Volume=` and `Mount=` entries from the Quadlet source file before a container exists. Other Quadlet resource types show a dash when they do not declare container mounts. Container inspection adds API requests during refresh while this column is enabled.
 
 ## Planned features
 

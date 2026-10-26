@@ -29,10 +29,20 @@ export function normalizeContainer(item) {
     status: item.Status || '',
     created: item.Created || null,
     ports: item.Ports || [],
+    mounts: null,
     pod: item.Pod || null,
     systemdUnit,
     source: systemdUnit ? 'systemd' : 'podman'
   };
+}
+
+export function normalizeMounts(mounts) {
+  if (!Array.isArray(mounts)) return [];
+  return mounts.map(mount => ({
+    type: mount.Type || '',
+    source: mount.Name || mount.Source || '',
+    destination: mount.Destination || ''
+  })).filter(mount => mount.source || mount.destination);
 }
 
 export function decodeLogStream(buffer) {
@@ -145,7 +155,21 @@ async function api(request, response, url) {
     try {
       const list = JSON.parse(result.body);
       if (!Array.isArray(list)) throw new Error('Expected a container list');
-      return json(response, 200, { containers: list.map(normalizeContainer) });
+      const containers = list.map(normalizeContainer);
+      if (url.searchParams.get('mounts') === 'true') {
+        // Inspect is needed for source and destination; list summaries only contain mount strings.
+        let next = 0;
+        await Promise.all(Array.from({ length: Math.min(4, containers.length) }, async () => {
+          while (next < containers.length) {
+            const container = containers[next++];
+            try {
+              const result = await inspect(container.id);
+              if (result.data) container.mounts = normalizeMounts(result.data.Mounts);
+            } catch { /* Keep this row available when its inspect request fails. */ }
+          }
+        }));
+      }
+      return json(response, 200, { containers });
     } catch { return json(response, 502, { error: 'Podman returned invalid container data' }); }
   }
 

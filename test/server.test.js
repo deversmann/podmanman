@@ -9,14 +9,14 @@ const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'podmanman-test-'));
 const socket = path.join(dir, 'podman.sock');
 const quadletDir = path.join(dir, 'quadlets');
 await fs.mkdir(path.join(quadletDir, 'nested'), { recursive: true });
-await fs.writeFile(path.join(quadletDir, 'nested', 'web.container'), '[Unit]\nDescription=Web server\n[Container]\nImage=quay.io/example/web:latest\nPublishPort=8080:80\nEnvironment=PASSWORD=secret\n');
+await fs.writeFile(path.join(quadletDir, 'nested', 'web.container'), '[Unit]\nDescription=Web server\n[Container]\nImage=quay.io/example/web:latest\nPublishPort=8080:80\nVolume=web-data:/data:ro\nMount=type=tmpfs,destination=/cache\nEnvironment=PASSWORD=secret\n');
 await fs.writeFile(path.join(quadletDir, 'data.volume'), '[Volume]\nVolumeName=web-data\n');
 await fs.writeFile(path.join(quadletDir, 'backbone.network'), '[Network]\nSubnet=10.10.0.0/24\n');
 await fs.writeFile(path.join(dir, 'outside.container'), '[Container]\nImage=private\n');
 await fs.symlink(path.join(dir, 'outside.container'), path.join(quadletDir, 'outside.container'));
 process.env.PODMAN_SOCKET = socket;
 process.env.QUADLET_DIRS = quadletDir;
-const { createServer, isContainerId, normalizeContainer, decodeLogStream } = await import('../server.js');
+const { createServer, isContainerId, normalizeContainer, normalizeMounts, decodeLogStream } = await import('../server.js');
 const { listQuadlets, parseQuadlet } = await import('../quadlets.js');
 const id = 'a'.repeat(64);
 const managedId = 'b'.repeat(64);
@@ -32,7 +32,7 @@ const fakePodman = http.createServer((request, response) => {
     { Id: id, Names: ['web'], Image: 'nginx:latest', State: 'running', Ports: [] },
     { Id: managedId, Names: ['service'], Image: 'redis:latest', State: 'running', Labels: { PODMAN_SYSTEMD_UNIT: 'service.service' } }
   ]));
-  if (request.url === `${libpod}/containers/${id}/json`) return response.end(JSON.stringify({ Id: id, Name: '/web', State: { Status: 'running' }, Config: { Image: 'nginx:latest', Env: ['PASSWORD=secret'], Labels: {} } }));
+  if (request.url === `${libpod}/containers/${id}/json`) return response.end(JSON.stringify({ Id: id, Name: '/web', State: { Status: 'running' }, Mounts: [{ Type: 'volume', Name: 'web-data', Source: '/home/user/.local/share/containers/storage/volumes/web-data/_data', Destination: '/data' }, { Type: 'bind', Source: '/home/user/config', Destination: '/config' }], Config: { Image: 'nginx:latest', Env: ['PASSWORD=secret'], Labels: {} } }));
   if (request.url === `${libpod}/containers/${managedId}/json`) return response.end(JSON.stringify({ Id: managedId, Name: '/service', State: { Status: 'running' }, Config: { Labels: { PODMAN_SYSTEMD_UNIT: 'service.service' } } }));
   if (request.url === `${libpod}/containers/${id}/logs?stdout=true&stderr=true&tail=200`) return response.end('hello\n');
   if (request.url === `${libpod}/containers/${id}/stop`) return response.end('{}');
@@ -74,6 +74,19 @@ test('lists CLI and systemd managed containers', async () => {
   assert.equal(data.containers[1].systemdUnit, 'service.service');
 });
 
+test('includes display-safe mount sources and destinations only when requested', async () => {
+  assert.deepEqual(normalizeMounts([{ Type: 'volume', Name: 'data', Source: '/private/path', Destination: '/data' }]), [{ type: 'volume', source: 'data', destination: '/data' }]);
+  const response = await fetch(`${base}/api/containers?mounts=true`);
+  assert.equal(response.status, 200);
+  const data = await response.json();
+  assert.deepEqual(data.containers[0].mounts, [
+    { type: 'volume', source: 'web-data', destination: '/data' },
+    { type: 'bind', source: '/home/user/config', destination: '/config' }
+  ]);
+  assert.deepEqual(data.containers[1].mounts, []);
+  assert.equal(JSON.stringify(data).includes('secret'), false);
+});
+
 test('lists Quadlet containers and resources without requiring a Podman object', async () => {
   const response = await fetch(`${base}/api/quadlets`);
   assert.equal(response.status, 200);
@@ -84,6 +97,10 @@ test('lists Quadlet containers and resources without requiring a Podman object',
   assert.equal(web.service, 'web.service');
   assert.equal(web.description, 'Web server');
   assert.equal(web.fields.find(field => field.label === 'Image').value, 'quay.io/example/web:latest');
+  assert.deepEqual(web.fields.filter(field => ['Volume', 'Mount'].includes(field.label)), [
+    { label: 'Volume', value: 'web-data:/data:ro' },
+    { label: 'Mount', value: 'type=tmpfs,destination=/cache' }
+  ]);
   assert.equal(JSON.stringify(data).includes('secret'), false);
   assert.equal(JSON.stringify(data).includes('outside.container'), false);
 });
